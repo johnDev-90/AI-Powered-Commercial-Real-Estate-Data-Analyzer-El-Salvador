@@ -41,7 +41,7 @@ export interface LlmClient {
   complete(request: CompletionRequest): Promise<CompletionResult>;
 }
 
-export type AiErrorCode = "NOT_CONFIGURED" | "RATE_LIMITED" | "TIMEOUT" | "AUTH" | "UPSTREAM" | "INVALID_OUTPUT" | "BAD_REQUEST";
+export type AiErrorCode = "NOT_CONFIGURED" | "RATE_LIMITED" | "QUOTA_EXCEEDED" | "MODEL_UNAVAILABLE" | "TIMEOUT" | "AUTH" | "UPSTREAM" | "INVALID_OUTPUT" | "BAD_REQUEST";
 
 export class AiError extends Error {
   constructor(public code: AiErrorCode, message: string) {
@@ -52,6 +52,8 @@ export class AiError extends Error {
 export const AI_ERROR_MESSAGES: Record<AiErrorCode, string> = {
   NOT_CONFIGURED: "AI analysis is not configured. Set OPENAI_API_KEY on the server to enable it. All deterministic features keep working.",
   RATE_LIMITED: "The AI provider is rate-limiting requests. Wait a moment and try again.",
+  QUOTA_EXCEEDED: "The OpenAI account has no available credit (insufficient_quota). Add billing credit at platform.openai.com → Settings → Billing, then try again.",
+  MODEL_UNAVAILABLE: "The configured OpenAI model is not available for this API key. Set OPENAI_MODEL to a model your account can use and redeploy.",
   TIMEOUT: "The AI provider did not respond in time. Try again or ask a narrower question.",
   AUTH: "The AI provider rejected the API key. Check OPENAI_API_KEY on the server.",
   UPSTREAM: "The AI provider returned an error. Try again later.",
@@ -75,7 +77,13 @@ export function isAiConfigured(): boolean {
 export function toAiError(error: unknown): AiError {
   if (error instanceof AiError) return error;
   if (error instanceof OpenAI.APIConnectionTimeoutError) return new AiError("TIMEOUT", "Request timed out");
-  if (error instanceof OpenAI.RateLimitError) return new AiError("RATE_LIMITED", "Rate limited");
+  // OpenAI returns 429 both for real rate limits and for accounts without credit.
+  if (error instanceof OpenAI.RateLimitError) {
+    return error.code === "insufficient_quota" ? new AiError("QUOTA_EXCEEDED", error.message) : new AiError("RATE_LIMITED", error.message);
+  }
+  if (error instanceof OpenAI.NotFoundError || (error instanceof OpenAI.APIError && error.code === "model_not_found")) {
+    return new AiError("MODEL_UNAVAILABLE", error.message);
+  }
   if (error instanceof OpenAI.AuthenticationError || error instanceof OpenAI.PermissionDeniedError) return new AiError("AUTH", "Authentication failed");
   if (error instanceof OpenAI.BadRequestError) return new AiError("BAD_REQUEST", error.message);
   if (error instanceof OpenAI.APIError) return new AiError("UPSTREAM", error.message);

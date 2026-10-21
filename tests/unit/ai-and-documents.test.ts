@@ -41,6 +41,11 @@ describe("AI answer grounding", () => {
   it("maps provider errors to stable codes", () => {
     expect(toAiError(new OpenAI.APIConnectionTimeoutError()).code).toBe("TIMEOUT");
     expect(toAiError(new OpenAI.RateLimitError(429, undefined, "rate", new Headers())).code).toBe("RATE_LIMITED");
+    // 429 without credit is a billing problem, not a transient rate limit.
+    const quota = { message: "You exceeded your current quota", type: "insufficient_quota", code: "insufficient_quota" };
+    expect(toAiError(new OpenAI.RateLimitError(429, quota, undefined, new Headers())).code).toBe("QUOTA_EXCEEDED");
+    const missingModel = { message: "The model does not exist", type: "invalid_request_error", code: "model_not_found" };
+    expect(toAiError(new OpenAI.NotFoundError(404, missingModel, undefined, new Headers())).code).toBe("MODEL_UNAVAILABLE");
     expect(toAiError(new OpenAI.AuthenticationError(401, undefined, "auth", new Headers())).code).toBe("AUTH");
     expect(toAiError(new Error("boom")).code).toBe("UPSTREAM");
     expect(toAiError(new AiError("INVALID_OUTPUT", "x")).code).toBe("INVALID_OUTPUT");
