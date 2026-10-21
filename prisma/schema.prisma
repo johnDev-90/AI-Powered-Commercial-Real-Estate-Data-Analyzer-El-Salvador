@@ -1,0 +1,315 @@
+// AI Real Estate Data Analyzer — El Salvador
+// Database URL is configured in prisma.config.ts (Prisma 7).
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum PropertyType {
+  COMMERCIAL_LAND
+  RETAIL
+  OFFICE
+  WAREHOUSE_INDUSTRIAL
+  SHOPPING_CENTER
+}
+
+/// User-attested documentation status. Never an official verification.
+enum VerificationStatus {
+  UNVERIFIED
+  PENDING_REVIEW
+  PARTIALLY_VERIFIED
+  VERIFIED
+}
+
+enum RecordSource {
+  SEED
+  CSV_IMPORT
+  MANUAL
+}
+
+enum AreaBasis {
+  LAND
+  BUILDING
+}
+
+enum ImportStatus {
+  PENDING_MAPPING
+  COMPLETED
+  FAILED
+}
+
+enum ImportRowStatus {
+  ACCEPTED
+  FLAGGED
+  REJECTED
+}
+
+enum IssueSeverity {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum IssueStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+enum IssueCategory {
+  COMPLETENESS
+  DUPLICATION
+  VALIDITY
+  CONSISTENCY
+  LOCATION
+  VERIFICATION
+  ANOMALY
+  CLASSIFICATION
+  DOCUMENT
+}
+
+enum AnalysisTrigger {
+  IMPORT
+  MANUAL
+  PROPERTY_EDIT
+  DOCUMENT
+}
+
+enum RunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum DocumentStatus {
+  UPLOADED
+  EXTRACTED
+  ANALYZED
+  FAILED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+model Property {
+  id                 String              @id @default(cuid())
+  /// User-facing "Property ID" from the source. Intentionally not unique: duplicates are kept and flagged.
+  referenceCode      String?
+  name               String?
+  address            String?
+  /// Lowercase, accent-stripped, abbreviation-expanded address used only for matching.
+  normalizedAddress  String?
+  municipality       String?
+  department         String?
+  propertyType       PropertyType?
+  /// Original classification label as provided by the source.
+  rawPropertyType    String?
+  cadastralId        String?
+  landAreaM2         Decimal?            @db.Decimal(14, 2)
+  buildingAreaM2     Decimal?            @db.Decimal(14, 2)
+  askingPriceUsd     Decimal?            @db.Decimal(16, 2)
+  /// Derived on every write: askingPrice / basis area.
+  pricePerM2Usd      Decimal?            @db.Decimal(14, 2)
+  pricePerM2Basis    AreaBasis?
+  /// Price per m² as stated by the source, kept for consistency checks.
+  sourcePricePerM2   Decimal?            @db.Decimal(14, 2)
+  description        String?
+  /// Free text as provided. Not verified.
+  zoning             String?
+  verificationStatus VerificationStatus?
+  source             RecordSource
+  isSynthetic        Boolean             @default(false)
+  /// "Last updated" date according to the source.
+  sourceUpdatedAt    DateTime?
+  importId           String?
+  import             DataImport?         @relation(fields: [importId], references: [id], onDelete: Restrict)
+  importRow          ImportRow?
+  issues             DataQualityIssue[]  @relation("IssueProperty")
+  relatedIssues      DataQualityIssue[]  @relation("IssueRelatedProperty")
+  documents          PropertyDocument[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  @@index([referenceCode])
+  @@index([cadastralId])
+  @@index([municipality, department])
+  @@index([propertyType])
+  @@index([verificationStatus])
+  @@index([normalizedAddress])
+  @@index([importId])
+}
+
+model DataImport {
+  id            String        @id @default(cuid())
+  fileName      String
+  fileSha256    String
+  /// Original CSV text, kept for provenance and re-processing.
+  fileContent   String
+  delimiter     String
+  headers       String[]
+  /// Column mapping and parsing options used to commit the import.
+  columnMapping Json?
+  status        ImportStatus
+  isSynthetic   Boolean       @default(false)
+  totalRows     Int           @default(0)
+  acceptedRows  Int           @default(0)
+  flaggedRows   Int           @default(0)
+  rejectedRows  Int           @default(0)
+  errorMessage  String?
+  rows          ImportRow[]
+  properties    Property[]
+  analysisRuns  AnalysisRun[]
+  createdAt     DateTime      @default(now())
+  completedAt   DateTime?
+
+  @@index([createdAt])
+  @@index([fileSha256])
+}
+
+model ImportRow {
+  id         String          @id @default(cuid())
+  importId   String
+  import     DataImport      @relation(fields: [importId], references: [id], onDelete: Cascade)
+  rowNumber  Int
+  /// Verbatim source values keyed by original header.
+  rawData    Json
+  status     ImportRowStatus
+  /// Rejection reasons or row-level warnings.
+  messages   Json
+  propertyId String?         @unique
+  property   Property?       @relation(fields: [propertyId], references: [id], onDelete: SetNull)
+
+  @@unique([importId, rowNumber])
+  @@index([importId, status])
+}
+
+model AnalysisRun {
+  id                 String             @id @default(cuid())
+  trigger            AnalysisTrigger
+  importId           String?
+  import             DataImport?        @relation(fields: [importId], references: [id], onDelete: SetNull)
+  rulesVersion       String
+  status             RunStatus
+  propertiesScanned  Int                @default(0)
+  issuesDetected     Int                @default(0)
+  issuesNew          Int                @default(0)
+  issuesReopened     Int                @default(0)
+  issuesAutoResolved Int                @default(0)
+  errorMessage       String?
+  startedAt          DateTime           @default(now())
+  finishedAt         DateTime?
+  issues             DataQualityIssue[]
+
+  @@index([startedAt])
+}
+
+model DataQualityIssue {
+  id                String             @id @default(cuid())
+  /// Deterministic hash of rule + property + field + related property; makes re-runs idempotent.
+  fingerprint       String             @unique
+  ruleCode          String
+  category          IssueCategory
+  severity          IssueSeverity
+  propertyId        String
+  property          Property           @relation("IssueProperty", fields: [propertyId], references: [id], onDelete: Cascade)
+  relatedPropertyId String?
+  relatedProperty   Property?          @relation("IssueRelatedProperty", fields: [relatedPropertyId], references: [id], onDelete: Cascade)
+  documentId        String?
+  document          PropertyDocument?  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  field             String?
+  observedValue     String?
+  expectedValue     String?
+  explanation       String
+  recommendation    String
+  status            IssueStatus        @default(OPEN)
+  firstRunId        String?
+  firstRun          AnalysisRun?       @relation(fields: [firstRunId], references: [id], onDelete: SetNull)
+  detectedAt        DateTime           @default(now())
+  lastDetectedAt    DateTime           @default(now())
+  reviewEvents      IssueReviewEvent[]
+
+  @@index([status, severity])
+  @@index([propertyId])
+  @@index([relatedPropertyId])
+  @@index([ruleCode])
+  @@index([category])
+  @@index([documentId])
+}
+
+/// Audit trail for resolve / dismiss / reopen / automatic resolution.
+model IssueReviewEvent {
+  id         String           @id @default(cuid())
+  issueId    String
+  issue      DataQualityIssue @relation(fields: [issueId], references: [id], onDelete: Cascade)
+  fromStatus IssueStatus
+  toStatus   IssueStatus
+  note       String?
+  /// "user" or "system" (no authentication in the MVP).
+  actor      String
+  createdAt  DateTime         @default(now())
+
+  @@index([issueId, createdAt])
+}
+
+model PropertyDocument {
+  id             String             @id @default(cuid())
+  propertyId     String
+  property       Property           @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  fileName       String
+  mimeType       String
+  sizeBytes      Int
+  sha256         String
+  content        Bytes
+  pageCount      Int?
+  /// [{ page, text }]
+  extractedPages Json?
+  /// Extracted fields with page + excerpt + excerptVerified, and the extraction method.
+  extraction     Json?
+  summary        String?
+  status         DocumentStatus
+  errorMessage   String?
+  issues         DataQualityIssue[]
+  createdAt      DateTime           @default(now())
+  analyzedAt     DateTime?
+
+  @@index([propertyId])
+}
+
+model AIConversation {
+  id        String      @id @default(cuid())
+  title     String
+  /// { propertyIds?, issueId?, documentId? } that seeded the conversation.
+  context   Json?
+  messages  AIMessage[]
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  @@index([updatedAt])
+}
+
+model AIMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AIConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  content        String
+  /// Findings, bases and limitations after the server-side citation check.
+  structured     Json?
+  /// Audit: tool name, validated arguments, returned record IDs.
+  toolCalls      Json?
+  model          String?
+  inputTokens    Int?
+  outputTokens   Int?
+  latencyMs      Int?
+  errorCode      String?
+  createdAt      DateTime       @default(now())
+
+  @@index([conversationId, createdAt])
+}
